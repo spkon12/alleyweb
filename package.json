@@ -1,0 +1,23 @@
+{
+  "name": "@roryb/truedev-alleyweb",
+  "version": "1.0.0",
+  "description": "Minimalist browser constrained to BT Home Hub, localhost, and direct IP access",
+  "main": "dist/main.js",
+  "author": "roryb / truedev",
+  "license": "MIT",
+  "scripts": {
+    "build": "tsc && tsc -p tsconfig.renderer.json && node -e \"const fs=require('fs');fs.copyFileSync('src/renderer/index.html','dist/renderer/index.html');fs.copyFileSync('src/renderer/styles.css','dist/renderer/styles.css');\"",
+    "start": "npm run build && electron .",
+    "dev": "npm run build && node scripts/run-dev.js",
+    "test": "npm run build && node dist/allowed-urls.test.js",
+    "test:e2e": "npm run build && electron scripts/e2e-cursor-navigate.js",
+    "test:e2e:app": "npm run build && node scripts/run-e2e-app.js",
+    "test:e2e:ipc": "npm run build && node scripts/run-e2e-ipc.js",
+    "test:e2e:form": "npm run build && node scripts/run-e2e-form.js"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "electron": "^33.2.0",
+    "typescript": "^5.7.2"
+  }
+}

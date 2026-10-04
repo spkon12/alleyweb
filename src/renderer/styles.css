@@ -1,0 +1,212 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+  --bg: #0f0f0f;
+  --surface: #1a1a1a;
+  --border: #2a2a2a;
+  --text: #e8e8e8;
+  --muted: #888;
+  --accent: #5b8def;
+  --accent-hover: #7aa3f5;
+  --danger: #e05c5c;
+  --chrome-h: 52px;
+  font-family:
+    "SF Pro Text",
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    sans-serif;
+}
+
+html,
+body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  overflow: hidden;
+}
+
+.chrome {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  align-items: center;
+  gap: 10px;
+  height: var(--chrome-h);
+  padding: 0 12px;
+  background: var(--surface);
+  border-bottom: 1px solid var(--border);
+}
+
+.brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  user-select: none;
+}
+
+.brand-mark {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border-radius: 6px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.brand-name {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  color: var(--muted);
+}
+
+.controls {
+  display: flex;
+  gap: 4px;
+}
+
+.icon-btn,
+.go-btn {
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  border-radius: 6px;
+  cursor: pointer;
+  transition:
+    background 120ms,
+    border-color 120ms;
+}
+
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  font-size: 15px;
+  line-height: 1;
+}
+
+.icon-btn:hover,
+.go-btn:hover {
+  background: #222;
+  border-color: #3a3a3a;
+}
+
+.icon-btn:active,
+.go-btn:active {
+  transform: translateY(1px);
+}
+
+.url-bar {
+  display: flex;
+  gap: 8px;
+  min-width: 0;
+}
+
+#url-input {
+  flex: 1;
+  min-width: 0;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--bg);
+  color: var(--text);
+  font-size: 13px;
+  outline: none;
+}
+
+#url-input:focus {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 2px rgb(91 141 239 / 20%);
+}
+
+.go-btn {
+  height: 32px;
+  padding: 0 14px;
+  font-size: 13px;
+  font-weight: 600;
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.go-btn:hover {
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
+}
+
+.loading {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% - var(--chrome-h));
+  height: 2px;
+  background: linear-gradient(
+    90deg,
+    transparent,
+    var(--accent),
+    transparent
+  );
+  animation: pulse 1s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%,
+  100% {
+    opacity: 0.35;
+  }
+  50% {
+    opacity: 1;
+  }
+}
+
+.toast {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  transform: translateX(-50%);
+  max-width: min(520px, calc(100vw - 32px));
+  padding: 10px 16px;
+  border-radius: 8px;
+  background: #2a1515;
+  border: 1px solid #5a2020;
+  color: #ffb4b4;
+  font-size: 13px;
+  line-height: 1.4;
+  box-shadow: 0 8px 24px rgb(0 0 0 / 35%);
+  z-index: 100;
+}
+
+.toast[hidden] {
+  display: none;
+}
+
+@media (max-width: 640px) {
+  .brand-name {
+    display: none;
+  }
+
+  .chrome {
+    grid-template-columns: auto 1fr;
+    grid-template-rows: auto auto;
+    height: auto;
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .controls {
+    order: 2;
+  }
+
+  .url-bar {
+    grid-column: 1 / -1;
+  }
+}

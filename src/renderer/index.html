@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Alleyweb</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="chrome">
+      <div class="brand" title="Alleyweb — truedev / roryb">
+        <span class="brand-mark">A</span>
+        <span class="brand-name">alleyweb</span>
+      </div>
+
+      <nav class="controls" aria-label="Navigation">
+        <button type="button" id="btn-back" class="icon-btn" title="Back" aria-label="Back">
+          ←
+        </button>
+        <button type="button" id="btn-forward" class="icon-btn" title="Forward" aria-label="Forward">
+          →
+        </button>
+        <button type="button" id="btn-reload" class="icon-btn" title="Reload" aria-label="Reload">
+          ↻
+        </button>
+        <button type="button" id="btn-home" class="icon-btn" title="Home hub" aria-label="Home hub">
+          ⌂
+        </button>
+      </nav>
+
+      <form id="url-form" class="url-bar" autocomplete="off">
+        <input
+          id="url-input"
+          type="text"
+          spellcheck="false"
+          placeholder="192.168.1.254 · localhost:3000 · 10.0.0.1"
+          aria-label="Address"
+        />
+        <button type="submit" class="go-btn">Go</button>
+      </form>
+
+      <div id="loading" class="loading" hidden aria-hidden="true"></div>
+    </header>
+
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <script type="module" src="app.js"></script>
+  </body>
+</html>
