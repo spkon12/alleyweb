@@ -11,6 +11,14 @@
     <link rel="stylesheet" href="styles.css" />
   </head>
   <body>
+    <div id="top-chrome">
+    <div id="tab-strip" class="tab-strip" role="tablist" aria-label="Tabs">
+      <div id="tab-list" class="tab-list"></div>
+      <button type="button" id="btn-new-tab" class="icon-btn tab-new" title="New tab (Ctrl+T)" aria-label="New tab">
+        +
+      </button>
+    </div>
+
     <header class="chrome">
       <div class="brand" title="Alleyweb — truedev / roryb">
         <span class="brand-mark">A</span>
@@ -45,6 +53,7 @@
 
       <div id="loading" class="loading" hidden aria-hidden="true"></div>
     </header>
+    </div>
 
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
 
