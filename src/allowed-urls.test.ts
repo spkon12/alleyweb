@@ -4,6 +4,7 @@ import {
   allowsUntrustedCertificateForHost,
   blockedReason,
   isAllowedUrl,
+  isExternalOAuthUrl,
   isChromiumCertificateOk,
   normalizeUserInput,
 } from "./allowed-urls";
@@ -25,6 +26,7 @@ const allowed = [
   "https://authenticate.cursor.sh/user_management/authorize",
   "blob:https://192.168.1.254/abc-123",
   "about:blank",
+  "file:///C:/Games/Alley%20Game/index.html",
 ];
 
 const blocked = [
@@ -33,6 +35,8 @@ const blocked = [
   "ftp://192.168.1.1",
   "javascript:alert(1)",
   "file:///etc/passwd",
+  "file:///C:/Games/readme.txt",
+  "file://server/share/game.html",
 ];
 
 for (const url of allowed) {
@@ -44,6 +48,10 @@ for (const url of blocked) {
 }
 
 assert.equal(normalizeUserInput(""), "http://192.168.1.254");
+assert.equal(
+  normalizeUserInput("C:\\Games\\Alley Game\\index.html"),
+  "file:///C:/Games/Alley%20Game/index.html"
+);
 assert.equal(normalizeUserInput("localhost:4000"), "http://localhost:4000");
 assert.equal(normalizeUserInput("cursor.com"), "https://cursor.com");
 assert.equal(normalizeUserInput("cursor.sh"), "https://cursor.sh");
@@ -57,6 +65,7 @@ assert.equal(
 );
 
 assert.match(blockedReason("https://google.com"), /domain name/i);
+assert.match(blockedReason("file:///tmp/note.txt"), /html files/i);
 
 assert.equal(allowsUntrustedCertificate("https://192.168.1.254/"), true);
 assert.equal(allowsUntrustedCertificate("https://bthomehub.home/"), true);
@@ -69,5 +78,29 @@ assert.equal(isChromiumCertificateOk("net::OK"), true);
 assert.equal(isChromiumCertificateOk("OK"), true);
 assert.equal(isChromiumCertificateOk("net::ERR_CERT_AUTHORITY_INVALID"), false);
 assert.equal(isAllowedUrl("blob:https://google.com/abc"), false);
+assert.equal(
+  isExternalOAuthUrl(
+    "https://accounts.google.com/o/oauth2/v2/auth?client_id=x"
+  ),
+  true
+);
+assert.equal(
+  isExternalOAuthUrl(
+    "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+  ),
+  true
+);
+assert.equal(
+  isExternalOAuthUrl("http://accounts.google.com/o/oauth2/auth"),
+  false
+);
+assert.equal(
+  isExternalOAuthUrl("https://accounts.google.com.evil.test/oauth/authorize"),
+  false
+);
+assert.equal(
+  isExternalOAuthUrl("https://example.org/oauth/authorize"),
+  false
+);
 
 console.log("allowed-urls: all checks passed");

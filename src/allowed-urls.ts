@@ -1,3 +1,5 @@
+import { pathToFileURL } from "node:url";
+
 /**
  * Alleyweb URL policy — only these destinations are reachable.
  *
@@ -7,6 +9,7 @@
  * 4. cursor.com / cursor.sh and their subdomains
  * 5. workos.com (Cursor login via WorkOS AuthKit)
  * 6. github.com (Cursor login via GitHub OAuth)
+ * 7. Local .html / .htm files via file://
  */
 
 const BT_HUB_HOSTNAMES = new Set([
@@ -20,12 +23,56 @@ const ALLOWED_DOMAIN_SUFFIXES = [
   "cursor.sh",
   "workos.com",
   "github.com",
+  "reddit.com",
+  "111.nhs.uk",
+  "www.nhs.uk",
+  "visland.party",
+  "itch.io",
+  "aniwaves.tv",
+  "onionplays.top",
+  "aws.amazon.com",
+  "youtube.com",
+  "index.html",
 ];
+
+const EXTERNAL_OAUTH_HOSTS = [
+  "accounts.google.com",
+  "login.microsoftonline.com",
+  "appleid.apple.com",
+];
+
+/** Only send known HTTPS authorization endpoints to the system browser. */
+export function isExternalOAuthUrl(rawUrl: string): boolean {
+  try {
+    const url = new URL(rawUrl);
+    if (
+      url.protocol !== "https:" ||
+      !/(?:\/oauth|\/authorize|\/saml|\/login)/i.test(url.pathname)
+    ) {
+      return false;
+    }
+    const host = url.hostname.toLowerCase();
+    return EXTERNAL_OAUTH_HOSTS.some(
+      (allowed) => host === allowed || host.endsWith(`.${allowed}`)
+    );
+  } catch {
+    return false;
+  }
+}
 
 /** Default BT Smart Hub admin address on most home networks. */
 export const BT_HUB_DEFAULT = "http://192.168.1.254";
 
 const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
+
+/** Windows drive paths typed on any OS (e.g. C:\page\index.html). */
+function windowsPathToFileUrl(trimmed: string): string {
+  const normalized = trimmed.replace(/\\/g, "/");
+  const segments = normalized.split("/");
+  const drive = segments[0];
+  const encoded = [drive, ...segments.slice(1).map(encodeURIComponent)].join("/");
+  return `file:///${encoded}`;
+}
 
 function isIPv4Literal(host: string): boolean {
   const parts = host.split(".");
@@ -100,6 +147,10 @@ export function isAllowedUrl(rawUrl: string): boolean {
     return true;
   }
 
+  if (parsed.protocol === "file:") {
+    return parsed.hostname === "" && /\.html?$/i.test(parsed.pathname);
+  }
+
   if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) {
     return false;
   }
@@ -119,7 +170,18 @@ export function normalizeUserInput(input: string): string {
   const trimmed = input.trim();
   if (!trimmed) return BT_HUB_DEFAULT;
 
+  if (/^[a-z]:[\\/]/i.test(trimmed)) {
+    if (process.platform === "win32") {
+      return pathToFileURL(trimmed).href;
+    }
+    return windowsPathToFileUrl(trimmed);
+  }
+
   if (/^https?:\/\//i.test(trimmed)) {
+    return trimmed;
+  }
+
+  if (/^file:\/\//i.test(trimmed)) {
     return trimmed;
   }
 
@@ -141,6 +203,10 @@ export function blockedReason(rawUrl: string): string {
     parsed = new URL(rawUrl);
   } catch {
     return "That address is not valid.";
+  }
+
+  if (parsed.protocol === "file:") {
+    return "Only local .html files can be opened via file://.";
   }
 
   if (!ALLOWED_PROTOCOLS.has(parsed.protocol)) {

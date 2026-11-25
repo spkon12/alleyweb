@@ -1,10 +1,21 @@
-import { app, BrowserWindow, BrowserView, ipcMain, session } from "electron";
+import {
+  app,
+  BrowserWindow,
+  BrowserView,
+  ipcMain,
+  session,
+  shell,
+  WebContents,
+} from "electron";
+import * as fs from "fs";
 import * as path from "path";
+import { pathToFileURL } from "node:url";
 import {
   allowsUntrustedCertificateForHost,
   BT_HUB_DEFAULT,
   blockedReason,
   isAllowedUrl,
+  isExternalOAuthUrl,
   normalizeUserInput,
 } from "./allowed-urls";
 
@@ -12,6 +23,8 @@ const DEFAULT_TAB_BAR_HEIGHT = 36;
 const DEFAULT_TOOLBAR_HEIGHT = 52;
 const SIDEBAR_WIDTH = 0;
 const DEBUG = process.env.ALLEYWEB_DEBUG === "1" || !app.isPackaged;
+const OAUTH_OPENED_MESSAGE =
+  "This sign-in opened in your system browser. Return here when it finishes.";
 
 function debugLog(message: string, data?: unknown): void {
   if (!DEBUG) return;
@@ -22,9 +35,14 @@ function debugLog(message: string, data?: unknown): void {
   console.log(`[alleyweb] ${message}`, data);
 }
 
+function tabsStatePath(): string {
+  return path.join(app.getPath("userData"), "tabs.json");
+}
+
 interface TabState {
   id: number;
   view: BrowserView;
+  url: string;
 }
 
 let mainWindow: BrowserWindow | null = null;
@@ -33,6 +51,10 @@ let activeTabId: number | null = null;
 let nextTabId = 1;
 /** Measured from renderer (tab strip + toolbar); fallback until first report. */
 let topChromeHeight = DEFAULT_TAB_BAR_HEIGHT + DEFAULT_TOOLBAR_HEIGHT;
+
+function isChromeIpc(event: Electron.IpcMainInvokeEvent): boolean {
+  return event.sender === mainWindow?.webContents;
+}
 
 function layoutBrowserView(): void {
   if (!mainWindow || activeTabId === null) return;
@@ -61,7 +83,22 @@ function sendToChrome(channel: string, ...args: unknown[]): void {
   mainWindow?.webContents.send(channel, ...args);
 }
 
-function broadcastTabs(): void {
+function persistAndBroadcastTabs(): void {
+  try {
+    const urls = tabs
+      .map((t) => t.url || t.view.webContents.getURL())
+      .filter((u) => isAllowedUrl(u));
+    const activeIndex = tabs.findIndex((t) => t.id === activeTabId);
+    fs.writeFileSync(
+      tabsStatePath(),
+      JSON.stringify({
+        tabs: urls,
+        activeIndex: Math.max(0, activeIndex),
+      })
+    );
+  } catch (error) {
+    debugLog("could not persist tabs", error);
+  }
   sendToChrome(
     "tabs-updated",
     tabs.map((t) => ({
@@ -72,33 +109,44 @@ function broadcastTabs(): void {
   );
 }
 
-function stopLoading(tab: TabState): void {
-  tab.view.webContents.stop();
-  if (tab.id === activeTabId) {
+function stopLoading(tabId: number | null = activeTabId): void {
+  const view =
+    tabId === null
+      ? undefined
+      : tabs.find((t) => t.id === tabId)?.view;
+  view?.webContents.stop();
+  if (tabId === activeTabId) {
     sendToChrome("loading-changed", false);
   }
 }
 
-function blockNavigation(tab: TabState, url: string): void {
-  stopLoading(tab);
-  if (tab.id === activeTabId) {
-    sendToChrome("navigation-blocked", blockedReason(url));
-  }
+function blockNavigation(
+  url: string,
+  tabId: number | null = activeTabId
+): void {
+  stopLoading(tabId);
+  sendToChrome("navigation-blocked", blockedReason(url));
 }
 
-function attachNavigationGuards(view: BrowserView, tabId: number): void {
-  const wc = view.webContents;
+function handleBlockedUrl(url: string, tabId: number | null): void {
+  if (isExternalOAuthUrl(url)) {
+    void shell.openExternal(url);
+    sendToChrome("navigation-blocked", OAUTH_OPENED_MESSAGE);
+    return;
+  }
+  blockNavigation(url, tabId);
+}
 
+function attachNavigationGuards(wc: WebContents, tabId: number | null): void {
   const sendIfActive = (channel: string, ...args: unknown[]) => {
-    if (activeTabId === tabId) sendToChrome(channel, ...args);
+    if (tabId === activeTabId) sendToChrome(channel, ...args);
   };
 
   wc.on("will-navigate", (event, url) => {
     debugLog("will-navigate", { tabId, url, allowed: isAllowedUrl(url) });
     if (!isAllowedUrl(url)) {
       event.preventDefault();
-      const tab = tabs.find((t) => t.id === tabId);
-      if (tab) blockNavigation(tab, url);
+      handleBlockedUrl(url, tabId);
     }
   });
 
@@ -106,33 +154,63 @@ function attachNavigationGuards(view: BrowserView, tabId: number): void {
     debugLog("will-redirect", { tabId, url, allowed: isAllowedUrl(url) });
     if (!isAllowedUrl(url)) {
       event.preventDefault();
-      const tab = tabs.find((t) => t.id === tabId);
-      if (tab) blockNavigation(tab, url);
+      handleBlockedUrl(url, tabId);
     }
   });
 
   wc.setWindowOpenHandler(({ url }) => {
-    if (isAllowedUrl(url)) {
-      wc.stop();
-      wc.loadURL(url);
-    } else {
-      const tab = tabs.find((t) => t.id === tabId);
-      if (tab) blockNavigation(tab, url);
+    if (isExternalOAuthUrl(url)) {
+      void shell.openExternal(url);
+      sendToChrome("navigation-blocked", OAUTH_OPENED_MESSAGE);
+      return { action: "deny" };
     }
-    return { action: "deny" };
+    if (!isAllowedUrl(url)) {
+      handleBlockedUrl(url, tabId);
+      return { action: "deny" };
+    }
+    return {
+      action: "allow",
+      overrideBrowserWindowOptions: {
+        width: 900,
+        height: 700,
+        webPreferences: {
+          session: session.defaultSession,
+          contextIsolation: true,
+          nodeIntegration: false,
+          sandbox: true,
+          webSecurity: true,
+        },
+      },
+    };
+  });
+
+  wc.on("did-create-window", (popup) => {
+    attachNavigationGuards(popup.webContents, null);
   });
 
   wc.on("did-start-loading", () => sendIfActive("loading-changed", true));
   wc.on("did-stop-loading", () => sendIfActive("loading-changed", false));
   wc.on("did-navigate", (_event, url) => {
     debugLog("did-navigate", { tabId, url });
+    if (tabId !== null) {
+      const tab = tabs.find((t) => t.id === tabId);
+      if (tab) tab.url = url;
+      persistAndBroadcastTabs();
+    }
     sendIfActive("url-changed", url);
   });
   wc.on("did-navigate-in-page", (_event, url) => {
     debugLog("did-navigate-in-page", { tabId, url });
+    if (tabId !== null) {
+      const tab = tabs.find((t) => t.id === tabId);
+      if (tab) tab.url = url;
+      persistAndBroadcastTabs();
+    }
     sendIfActive("url-changed", url);
   });
-  wc.on("page-title-updated", () => broadcastTabs());
+  wc.on("page-title-updated", () => {
+    if (tabId !== null) persistAndBroadcastTabs();
+  });
 
   wc.on(
     "did-fail-load",
@@ -156,14 +234,16 @@ function attachNavigationGuards(view: BrowserView, tabId: number): void {
 }
 
 function createBrowserView(): BrowserView {
-  return new BrowserView({
+  const view = new BrowserView({
     webPreferences: {
+      session: session.defaultSession,
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
       webSecurity: true,
     },
   });
+  return view;
 }
 
 function setActiveTab(id: number): void {
@@ -173,18 +253,23 @@ function setActiveTab(id: number): void {
   activeTabId = id;
   mainWindow.setBrowserView(tab.view);
   layoutBrowserView();
-  sendToChrome("url-changed", tab.view.webContents.getURL() || BT_HUB_DEFAULT);
+  sendToChrome("url-changed", tab.view.webContents.getURL() || tab.url);
   sendToChrome("loading-changed", tab.view.webContents.isLoading());
-  broadcastTabs();
+  persistAndBroadcastTabs();
 }
 
-function createTab(url: string = BT_HUB_DEFAULT): number {
+function createTab(url: string = BT_HUB_DEFAULT, activate = true): number {
   const id = nextTabId++;
   const view = createBrowserView();
-  attachNavigationGuards(view, id);
-  tabs.push({ id, view });
-  void view.webContents.loadURL(url);
-  setActiveTab(id);
+  const loadUrl = isAllowedUrl(url) ? url : BT_HUB_DEFAULT;
+  attachNavigationGuards(view.webContents, id);
+  tabs.push({ id, view, url: loadUrl });
+  void view.webContents.loadURL(loadUrl);
+  if (activate) {
+    setActiveTab(id);
+  } else {
+    persistAndBroadcastTabs();
+  }
   return id;
 }
 
@@ -204,7 +289,7 @@ function closeTab(id: number): void {
     const next = tabs[Math.min(index, tabs.length - 1)];
     setActiveTab(next.id);
   } else {
-    broadcastTabs();
+    persistAndBroadcastTabs();
   }
 }
 
@@ -213,10 +298,16 @@ function activeTab(): TabState | undefined {
   return tabs.find((t) => t.id === activeTabId);
 }
 
+function tabById(tabId: number | null | undefined): TabState | undefined {
+  if (tabId === null || tabId === undefined) return activeTab();
+  return tabs.find((t) => t.id === tabId);
+}
+
 async function navigateTo(
-  rawInput: string
+  rawInput: string,
+  tabId = activeTabId
 ): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
-  const tab = activeTab();
+  const tab = tabById(tabId);
   const wc = tab?.view.webContents;
   if (!wc) {
     return { ok: false, reason: "Browser is not ready yet." };
@@ -225,20 +316,41 @@ async function navigateTo(
   const url = normalizeUserInput(rawInput);
   debugLog("navigateTo", { rawInput, url, allowed: isAllowedUrl(url) });
   if (!isAllowedUrl(url)) {
-    sendToChrome("loading-changed", false);
+    if (tabId === activeTabId) sendToChrome("loading-changed", false);
     return { ok: false, reason: blockedReason(url) };
   }
 
   try {
     await wc.loadURL(url);
+    if (tab) tab.url = wc.getURL() || url;
+    persistAndBroadcastTabs();
     debugLog("navigateTo success", wc.getURL());
     return { ok: true, url: wc.getURL() || url };
   } catch (error) {
-    sendToChrome("loading-changed", false);
+    if (tabId === activeTabId) sendToChrome("loading-changed", false);
     const message =
       error instanceof Error ? error.message : "Could not open that address.";
     debugLog("navigateTo failed", message);
     return { ok: false, reason: message };
+  }
+}
+
+function restoreTabsFromDisk(): { urls: string[]; activeIndex: number } {
+  try {
+    const state = JSON.parse(fs.readFileSync(tabsStatePath(), "utf8")) as {
+      tabs?: unknown;
+      activeIndex?: number;
+    };
+    const urls = Array.isArray(state.tabs)
+      ? state.tabs.filter(
+          (u): u is string => typeof u === "string" && isAllowedUrl(u)
+        )
+      : [];
+    const activeIndex =
+      typeof state.activeIndex === "number" ? state.activeIndex : 0;
+    return { urls, activeIndex };
+  } catch {
+    return { urls: [], activeIndex: 0 };
   }
 }
 
@@ -265,12 +377,20 @@ function createWindow(): void {
       console.log(`[chrome:${level}] ${message}`);
     });
   }
-  mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
-  createTab(BT_HUB_DEFAULT);
+  const { urls: restored, activeIndex: savedActive } = restoreTabsFromDisk();
+  const startUrls = restored.length ? restored : [BT_HUB_DEFAULT];
+  startUrls.forEach((url, index) => createTab(url, index === 0));
+  const ids = tabs.map((t) => t.id);
+  if (ids[savedActive] !== undefined) {
+    setActiveTab(ids[savedActive]);
+  }
+
+  mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
   mainWindow.on("closed", () => {
     mainWindow = null;
+    for (const tab of tabs) tab.view.webContents.close();
     tabs = [];
     activeTabId = null;
   });
@@ -325,7 +445,6 @@ if (!gotSingleInstanceLock) {
 }
 
 app.whenReady().then(async () => {
-  await session.defaultSession.clearCache();
   installSessionBlocklist();
   createWindow();
 
@@ -340,38 +459,57 @@ app.whenReady().then(async () => {
     layoutBrowserView();
   });
 
-  ipcMain.handle("tabs-new", () => {
-    const id = createTab();
-    return id;
+  ipcMain.handle("tabs-new", (event) => {
+    if (!isChromeIpc(event)) return null;
+    return createTab();
   });
-  ipcMain.handle("tabs-close", (_event, tabId: number) => {
-    closeTab(tabId);
+  ipcMain.handle("tabs-close", (event, tabId: number) => {
+    if (isChromeIpc(event)) closeTab(tabId);
   });
-  ipcMain.handle("tabs-activate", (_event, tabId: number) => {
-    setActiveTab(tabId);
+  ipcMain.handle("tabs-activate", (event, tabId: number) => {
+    if (isChromeIpc(event)) setActiveTab(tabId);
   });
 
-  ipcMain.handle("navigate", async (_event, input: string) => {
-    debugLog("ipc navigate", input);
-    const result = await navigateTo(input);
+  ipcMain.handle("navigate", async (event, input: string, tabId?: number) => {
+    if (!isChromeIpc(event)) {
+      return { ok: false as const, reason: "Invalid caller." };
+    }
+    const targetId =
+      tabId !== undefined && tabs.some((t) => t.id === tabId)
+        ? tabId
+        : activeTabId;
+    debugLog("ipc navigate", { input, tabId: targetId });
+    const result = await navigateTo(input, targetId);
     debugLog("ipc navigate result", result);
     if (!result.ok) {
       sendToChrome("navigation-blocked", result.reason);
     }
     return result;
   });
-  ipcMain.handle("go-back", () => activeTab()?.view.webContents.goBack());
-  ipcMain.handle("go-forward", () => activeTab()?.view.webContents.goForward());
-  ipcMain.handle("reload", () => {
-    const wc = activeTab()?.view.webContents;
+  ipcMain.handle("go-back", (event, tabId?: number) => {
+    if (!isChromeIpc(event)) return;
+    tabById(tabId)?.view.webContents.goBack();
+  });
+  ipcMain.handle("go-forward", (event, tabId?: number) => {
+    if (!isChromeIpc(event)) return;
+    tabById(tabId)?.view.webContents.goForward();
+  });
+  ipcMain.handle("reload", (event, tabId?: number) => {
+    if (!isChromeIpc(event)) return;
+    const wc = tabById(tabId)?.view.webContents;
     wc?.stop();
     wc?.reload();
   });
-  ipcMain.handle("go-home", async () => navigateTo(""));
-  ipcMain.handle(
-    "get-current-url",
-    () => activeTab()?.view.webContents.getURL() ?? BT_HUB_DEFAULT
-  );
+  ipcMain.handle("go-home", async (event, tabId?: number) => {
+    if (!isChromeIpc(event)) {
+      return { ok: false as const, reason: "Invalid caller." };
+    }
+    return navigateTo("", tabId);
+  });
+  ipcMain.handle("get-current-url", (event, tabId?: number) => {
+    if (!isChromeIpc(event)) return BT_HUB_DEFAULT;
+    return tabById(tabId)?.view.webContents.getURL() ?? BT_HUB_DEFAULT;
+  });
 
   app.on("activate", () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -431,11 +569,13 @@ app.whenReady().then(async () => {
         createTab(BT_HUB_DEFAULT);
         await new Promise((resolve) => setTimeout(resolve, 500));
         const image = await mainWindow.webContents.capturePage();
-        const out = process.env.ALLEYWEB_SCREENSHOT_PATH ?? "/opt/cursor/artifacts/tab-bar.png";
-        const { writeFileSync, mkdirSync } = await import("fs");
+        const out =
+          process.env.ALLEYWEB_SCREENSHOT_PATH ??
+          "/opt/cursor/artifacts/tab-bar.png";
+        const { mkdirSync } = await import("fs");
         const { dirname } = await import("path");
         mkdirSync(dirname(out), { recursive: true });
-        writeFileSync(out, image.toPNG());
+        fs.writeFileSync(out, image.toPNG());
         debugLog("screenshot saved", out);
         app.exit(0);
       } catch (error) {
@@ -443,6 +583,35 @@ app.whenReady().then(async () => {
         app.exit(1);
       }
     }, 2000);
+  }
+
+  if (process.env.ALLEYWEB_E2E === "screenshot-local") {
+    setTimeout(async () => {
+      try {
+        const tab = activeTab();
+        if (!mainWindow || !tab) throw new Error("main window missing");
+        const htmlPath = path.join(app.getPath("temp"), "alleyweb-local-demo.html");
+        fs.writeFileSync(
+          htmlPath,
+          `<!DOCTYPE html><html><head><title>Local demo</title></head><body style="font-family:sans-serif;background:#1a2a1a;color:#cfc;padding:24px"><h1>Local HTML file</h1><p>Opened via file:// in Alleyweb.</p></body></html>`
+        );
+        const fileUrl = pathToFileURL(htmlPath).href;
+        const nav = await navigateTo(fileUrl);
+        if (!nav.ok) throw new Error(nav.reason);
+        await new Promise((resolve) => setTimeout(resolve, 800));
+        const image = await mainWindow.webContents.capturePage();
+        const out =
+          process.env.ALLEYWEB_SCREENSHOT_PATH ??
+          "/opt/cursor/artifacts/local-html-tab.png";
+        fs.mkdirSync(path.dirname(out), { recursive: true });
+        fs.writeFileSync(out, image.toPNG());
+        debugLog("screenshot-local saved", out);
+        app.exit(0);
+      } catch (error) {
+        debugLog("screenshot-local failed", error);
+        app.exit(1);
+      }
+    }, 1500);
   }
 });
 

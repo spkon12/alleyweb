@@ -7,12 +7,14 @@ export interface TabInfo {
 }
 
 contextBridge.exposeInMainWorld("alleyweb", {
-  navigate: (url: string) => ipcRenderer.invoke("navigate", url),
-  goBack: () => ipcRenderer.invoke("go-back"),
-  goForward: () => ipcRenderer.invoke("go-forward"),
-  reload: () => ipcRenderer.invoke("reload"),
-  goHome: () => ipcRenderer.invoke("go-home"),
-  getCurrentUrl: () => ipcRenderer.invoke("get-current-url"),
+  navigate: (url: string, tabId?: number) =>
+    ipcRenderer.invoke("navigate", url, tabId),
+  goBack: (tabId?: number) => ipcRenderer.invoke("go-back", tabId),
+  goForward: (tabId?: number) => ipcRenderer.invoke("go-forward", tabId),
+  reload: (tabId?: number) => ipcRenderer.invoke("reload", tabId),
+  goHome: (tabId?: number) => ipcRenderer.invoke("go-home", tabId),
+  getCurrentUrl: (tabId?: number) =>
+    ipcRenderer.invoke("get-current-url", tabId),
   setTopChromeHeight: (height: number) =>
     ipcRenderer.invoke("set-top-chrome-height", height),
   newTab: () => ipcRenderer.invoke("tabs-new") as Promise<number>,

@@ -5,12 +5,17 @@ interface TabInfo {
 }
 
 interface AlleywebApi {
-  navigate: (url: string) => Promise<{ ok: true; url: string } | { ok: false; reason: string }>;
-  goBack: () => Promise<void>;
-  goForward: () => Promise<void>;
-  reload: () => Promise<void>;
-  goHome: () => Promise<{ ok: true; url: string } | { ok: false; reason: string }>;
-  getCurrentUrl: () => Promise<string>;
+  navigate: (
+    url: string,
+    tabId?: number
+  ) => Promise<{ ok: true; url: string } | { ok: false; reason: string }>;
+  goBack: (tabId?: number) => Promise<void>;
+  goForward: (tabId?: number) => Promise<void>;
+  reload: (tabId?: number) => Promise<void>;
+  goHome: (
+    tabId?: number
+  ) => Promise<{ ok: true; url: string } | { ok: false; reason: string }>;
+  getCurrentUrl: (tabId?: number) => Promise<string>;
   setTopChromeHeight: (height: number) => Promise<void>;
   newTab: () => Promise<number>;
   closeTab: (tabId: number) => Promise<void>;
@@ -41,6 +46,7 @@ let toastTimer: ReturnType<typeof setTimeout> | undefined;
 let userEditedAddress = false;
 let navigating = false;
 let tabs: TabInfo[] = [];
+let activeTabId = 0;
 
 function debugLog(message: string, data?: unknown): void {
   if (data === undefined) {
@@ -65,6 +71,8 @@ function showToast(message: string): void {
 }
 
 function renderTabs(): void {
+  const active = tabs.find((tab) => tab.active);
+  if (active) activeTabId = active.id;
   tabList.replaceChildren();
   for (const tab of tabs) {
     const button = document.createElement("button");
@@ -104,7 +112,7 @@ async function submitUrl(): Promise<void> {
 
   navigating = true;
   debugLog("submit", typed);
-  const result = await window.alleyweb.navigate(typed);
+  const result = await window.alleyweb.navigate(typed, activeTabId || undefined);
   navigating = false;
   debugLog("submit result", result);
 
@@ -130,21 +138,21 @@ form.addEventListener("submit", (event) => {
 
 document.getElementById("btn-back")?.addEventListener("click", () => {
   userEditedAddress = false;
-  void window.alleyweb.goBack();
+  void window.alleyweb.goBack(activeTabId || undefined);
 });
 
 document.getElementById("btn-forward")?.addEventListener("click", () => {
   userEditedAddress = false;
-  void window.alleyweb.goForward();
+  void window.alleyweb.goForward(activeTabId || undefined);
 });
 
 document.getElementById("btn-reload")?.addEventListener("click", () => {
-  void window.alleyweb.reload();
+  void window.alleyweb.reload(activeTabId || undefined);
 });
 
 document.getElementById("btn-home")?.addEventListener("click", () => {
   userEditedAddress = false;
-  void window.alleyweb.goHome();
+  void window.alleyweb.goHome(activeTabId || undefined);
 });
 
 document.getElementById("btn-new-tab")?.addEventListener("click", () => {
@@ -153,7 +161,13 @@ document.getElementById("btn-new-tab")?.addEventListener("click", () => {
 
 document.addEventListener("keydown", (event) => {
   const mod = event.ctrlKey || event.metaKey;
-  if (!mod) return;
+  if (!mod || event.altKey) return;
+  if (event.key === "l" || event.key === "L") {
+    event.preventDefault();
+    input.focus();
+    input.select();
+    return;
+  }
   if (event.key === "t" || event.key === "T") {
     event.preventDefault();
     void window.alleyweb.newTab();
