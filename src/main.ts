@@ -8,7 +8,8 @@ import {
   normalizeUserInput,
 } from "./allowed-urls";
 
-const CHROME_HEIGHT = 52;
+const DEFAULT_TAB_BAR_HEIGHT = 36;
+const DEFAULT_TOOLBAR_HEIGHT = 52;
 const SIDEBAR_WIDTH = 0;
 const DEBUG = process.env.ALLEYWEB_DEBUG === "1" || !app.isPackaged;
 
@@ -21,50 +22,92 @@ function debugLog(message: string, data?: unknown): void {
   console.log(`[alleyweb] ${message}`, data);
 }
 
+interface TabState {
+  id: number;
+  view: BrowserView;
+}
+
 let mainWindow: BrowserWindow | null = null;
-let browserView: BrowserView | null = null;
+let tabs: TabState[] = [];
+let activeTabId: number | null = null;
+let nextTabId = 1;
+/** Measured from renderer (tab strip + toolbar); fallback until first report. */
+let topChromeHeight = DEFAULT_TAB_BAR_HEIGHT + DEFAULT_TOOLBAR_HEIGHT;
 
 function layoutBrowserView(): void {
-  if (!mainWindow || !browserView) return;
+  if (!mainWindow || activeTabId === null) return;
+  const tab = tabs.find((t) => t.id === activeTabId);
+  if (!tab) return;
   const [width, height] = mainWindow.getContentSize();
-  browserView.setBounds({
+  tab.view.setBounds({
     x: SIDEBAR_WIDTH,
-    y: CHROME_HEIGHT,
+    y: topChromeHeight,
     width: Math.max(0, width - SIDEBAR_WIDTH),
-    height: Math.max(0, height - CHROME_HEIGHT),
+    height: Math.max(0, height - topChromeHeight),
   });
+}
+
+function bindLayoutEvents(): void {
+  if (!mainWindow) return;
+  const relayout = () => layoutBrowserView();
+  mainWindow.on("resize", relayout);
+  mainWindow.on("maximize", relayout);
+  mainWindow.on("unmaximize", relayout);
+  mainWindow.on("enter-full-screen", relayout);
+  mainWindow.on("leave-full-screen", relayout);
 }
 
 function sendToChrome(channel: string, ...args: unknown[]): void {
   mainWindow?.webContents.send(channel, ...args);
 }
 
-function stopLoading(): void {
-  browserView?.webContents.stop();
-  sendToChrome("loading-changed", false);
+function broadcastTabs(): void {
+  sendToChrome(
+    "tabs-updated",
+    tabs.map((t) => ({
+      id: t.id,
+      title: t.view.webContents.getTitle() || "New tab",
+      active: t.id === activeTabId,
+    }))
+  );
 }
 
-function blockNavigation(url: string): void {
-  stopLoading();
-  sendToChrome("navigation-blocked", blockedReason(url));
+function stopLoading(tab: TabState): void {
+  tab.view.webContents.stop();
+  if (tab.id === activeTabId) {
+    sendToChrome("loading-changed", false);
+  }
 }
 
-function attachNavigationGuards(view: BrowserView): void {
+function blockNavigation(tab: TabState, url: string): void {
+  stopLoading(tab);
+  if (tab.id === activeTabId) {
+    sendToChrome("navigation-blocked", blockedReason(url));
+  }
+}
+
+function attachNavigationGuards(view: BrowserView, tabId: number): void {
   const wc = view.webContents;
 
+  const sendIfActive = (channel: string, ...args: unknown[]) => {
+    if (activeTabId === tabId) sendToChrome(channel, ...args);
+  };
+
   wc.on("will-navigate", (event, url) => {
-    debugLog("will-navigate", { url, allowed: isAllowedUrl(url) });
+    debugLog("will-navigate", { tabId, url, allowed: isAllowedUrl(url) });
     if (!isAllowedUrl(url)) {
       event.preventDefault();
-      blockNavigation(url);
+      const tab = tabs.find((t) => t.id === tabId);
+      if (tab) blockNavigation(tab, url);
     }
   });
 
   wc.on("will-redirect", (event, url) => {
-    debugLog("will-redirect", { url, allowed: isAllowedUrl(url) });
+    debugLog("will-redirect", { tabId, url, allowed: isAllowedUrl(url) });
     if (!isAllowedUrl(url)) {
       event.preventDefault();
-      blockNavigation(url);
+      const tab = tabs.find((t) => t.id === tabId);
+      if (tab) blockNavigation(tab, url);
     }
   });
 
@@ -73,36 +116,38 @@ function attachNavigationGuards(view: BrowserView): void {
       wc.stop();
       wc.loadURL(url);
     } else {
-      blockNavigation(url);
+      const tab = tabs.find((t) => t.id === tabId);
+      if (tab) blockNavigation(tab, url);
     }
     return { action: "deny" };
   });
 
-  wc.on("did-start-loading", () => sendToChrome("loading-changed", true));
-  wc.on("did-stop-loading", () => sendToChrome("loading-changed", false));
+  wc.on("did-start-loading", () => sendIfActive("loading-changed", true));
+  wc.on("did-stop-loading", () => sendIfActive("loading-changed", false));
   wc.on("did-navigate", (_event, url) => {
-    debugLog("did-navigate", url);
-    sendToChrome("url-changed", url);
+    debugLog("did-navigate", { tabId, url });
+    sendIfActive("url-changed", url);
   });
   wc.on("did-navigate-in-page", (_event, url) => {
-    debugLog("did-navigate-in-page", url);
-    sendToChrome("url-changed", url);
+    debugLog("did-navigate-in-page", { tabId, url });
+    sendIfActive("url-changed", url);
   });
+  wc.on("page-title-updated", () => broadcastTabs());
 
   wc.on(
     "did-fail-load",
     (_event, errorCode, errorDescription, validatedURL, isMainFrame) => {
       debugLog("did-fail-load", {
+        tabId,
         errorCode,
         errorDescription,
         validatedURL,
         isMainFrame,
       });
       if (!isMainFrame) return;
-      sendToChrome("loading-changed", false);
-      // ERR_ABORTED (-3) is expected after wc.stop().
+      sendIfActive("loading-changed", false);
       if (errorCode === -3) return;
-      sendToChrome(
+      sendIfActive(
         "navigation-failed",
         `${errorDescription} (${validatedURL || "unknown address"})`
       );
@@ -110,10 +155,69 @@ function attachNavigationGuards(view: BrowserView): void {
   );
 }
 
+function createBrowserView(): BrowserView {
+  return new BrowserView({
+    webPreferences: {
+      contextIsolation: true,
+      nodeIntegration: false,
+      sandbox: true,
+      webSecurity: true,
+    },
+  });
+}
+
+function setActiveTab(id: number): void {
+  if (!mainWindow) return;
+  const tab = tabs.find((t) => t.id === id);
+  if (!tab) return;
+  activeTabId = id;
+  mainWindow.setBrowserView(tab.view);
+  layoutBrowserView();
+  sendToChrome("url-changed", tab.view.webContents.getURL() || BT_HUB_DEFAULT);
+  sendToChrome("loading-changed", tab.view.webContents.isLoading());
+  broadcastTabs();
+}
+
+function createTab(url: string = BT_HUB_DEFAULT): number {
+  const id = nextTabId++;
+  const view = createBrowserView();
+  attachNavigationGuards(view, id);
+  tabs.push({ id, view });
+  void view.webContents.loadURL(url);
+  setActiveTab(id);
+  return id;
+}
+
+function closeTab(id: number): void {
+  const index = tabs.findIndex((t) => t.id === id);
+  if (index === -1) return;
+  const [removed] = tabs.splice(index, 1);
+  if (mainWindow?.getBrowserView() === removed.view) {
+    mainWindow.setBrowserView(null);
+  }
+  removed.view.webContents.close();
+  if (tabs.length === 0) {
+    createTab();
+    return;
+  }
+  if (activeTabId === id) {
+    const next = tabs[Math.min(index, tabs.length - 1)];
+    setActiveTab(next.id);
+  } else {
+    broadcastTabs();
+  }
+}
+
+function activeTab(): TabState | undefined {
+  if (activeTabId === null) return undefined;
+  return tabs.find((t) => t.id === activeTabId);
+}
+
 async function navigateTo(
   rawInput: string
 ): Promise<{ ok: true; url: string } | { ok: false; reason: string }> {
-  const wc = browserView?.webContents;
+  const tab = activeTab();
+  const wc = tab?.view.webContents;
   if (!wc) {
     return { ok: false, reason: "Browser is not ready yet." };
   }
@@ -154,20 +258,7 @@ function createWindow(): void {
     },
   });
 
-  browserView = new BrowserView({
-    webPreferences: {
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: true,
-      webSecurity: true,
-    },
-  });
-
-  mainWindow.setBrowserView(browserView);
-  attachNavigationGuards(browserView);
-  layoutBrowserView();
-
-  mainWindow.on("resize", layoutBrowserView);
+  bindLayoutEvents();
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: "deny" }));
   if (DEBUG) {
     mainWindow.webContents.on("console-message", (_event, level, message) => {
@@ -176,11 +267,12 @@ function createWindow(): void {
   }
   mainWindow.loadFile(path.join(__dirname, "renderer", "index.html"));
 
-  browserView.webContents.loadURL(BT_HUB_DEFAULT);
+  createTab(BT_HUB_DEFAULT);
 
   mainWindow.on("closed", () => {
     mainWindow = null;
-    browserView = null;
+    tabs = [];
+    activeTabId = null;
   });
 }
 
@@ -194,7 +286,6 @@ function installSessionBlocklist(): void {
         callback({ cancel: !allowed });
         return;
       }
-      // Subresources inherit the main frame origin on allowed pages.
       callback({ cancel: false });
     }
   );
@@ -238,6 +329,28 @@ app.whenReady().then(async () => {
   installSessionBlocklist();
   createWindow();
 
+  ipcMain.handle("set-top-chrome-height", (_event, height: number) => {
+    if (typeof height !== "number" || !Number.isFinite(height) || height < 0) {
+      return;
+    }
+    const rounded = Math.round(height);
+    if (rounded === topChromeHeight) return;
+    topChromeHeight = rounded;
+    debugLog("top chrome height", topChromeHeight);
+    layoutBrowserView();
+  });
+
+  ipcMain.handle("tabs-new", () => {
+    const id = createTab();
+    return id;
+  });
+  ipcMain.handle("tabs-close", (_event, tabId: number) => {
+    closeTab(tabId);
+  });
+  ipcMain.handle("tabs-activate", (_event, tabId: number) => {
+    setActiveTab(tabId);
+  });
+
   ipcMain.handle("navigate", async (_event, input: string) => {
     debugLog("ipc navigate", input);
     const result = await navigateTo(input);
@@ -247,16 +360,17 @@ app.whenReady().then(async () => {
     }
     return result;
   });
-  ipcMain.handle("go-back", () => browserView?.webContents.goBack());
-  ipcMain.handle("go-forward", () => browserView?.webContents.goForward());
+  ipcMain.handle("go-back", () => activeTab()?.view.webContents.goBack());
+  ipcMain.handle("go-forward", () => activeTab()?.view.webContents.goForward());
   ipcMain.handle("reload", () => {
-    browserView?.webContents.stop();
-    browserView?.webContents.reload();
+    const wc = activeTab()?.view.webContents;
+    wc?.stop();
+    wc?.reload();
   });
   ipcMain.handle("go-home", async () => navigateTo(""));
   ipcMain.handle(
     "get-current-url",
-    () => browserView?.webContents.getURL() ?? BT_HUB_DEFAULT
+    () => activeTab()?.view.webContents.getURL() ?? BT_HUB_DEFAULT
   );
 
   app.on("activate", () => {
@@ -274,13 +388,14 @@ app.whenReady().then(async () => {
   if (process.env.ALLEYWEB_E2E === "form") {
     setTimeout(async () => {
       try {
-        if (!mainWindow || !browserView) throw new Error("windows missing");
+        const tab = activeTab();
+        if (!mainWindow || !tab) throw new Error("windows missing");
         await mainWindow.webContents.executeJavaScript(`
           document.getElementById('url-input').value = 'cursor.com';
           document.getElementById('url-form').requestSubmit();
         `);
         await new Promise((resolve) => setTimeout(resolve, 8000));
-        const current = browserView.webContents.getURL();
+        const current = tab.view.webContents.getURL();
         debugLog("e2e form browserView url", current);
         app.exit(current.includes("cursor.com") ? 0 : 1);
       } catch (error) {
@@ -298,10 +413,9 @@ app.whenReady().then(async () => {
           "window.alleyweb.navigate('cursor.com')"
         );
         debugLog("e2e ipc result", result);
-        const current = browserView?.webContents.getURL() ?? "";
+        const current = activeTab()?.view.webContents.getURL() ?? "";
         debugLog("e2e ipc browserView url", current);
-        const ok =
-          result?.ok === true && current.includes("cursor.com");
+        const ok = result?.ok === true && current.includes("cursor.com");
         app.exit(ok ? 0 : 1);
       } catch (error) {
         debugLog("e2e ipc failed", error);
@@ -309,9 +423,29 @@ app.whenReady().then(async () => {
       }
     }, 3000);
   }
+
+  if (process.env.ALLEYWEB_E2E === "screenshot") {
+    setTimeout(async () => {
+      try {
+        if (!mainWindow) throw new Error("main window missing");
+        createTab(BT_HUB_DEFAULT);
+        await new Promise((resolve) => setTimeout(resolve, 500));
+        const image = await mainWindow.webContents.capturePage();
+        const out = process.env.ALLEYWEB_SCREENSHOT_PATH ?? "/opt/cursor/artifacts/tab-bar.png";
+        const { writeFileSync, mkdirSync } = await import("fs");
+        const { dirname } = await import("path");
+        mkdirSync(dirname(out), { recursive: true });
+        writeFileSync(out, image.toPNG());
+        debugLog("screenshot saved", out);
+        app.exit(0);
+      } catch (error) {
+        debugLog("screenshot failed", error);
+        app.exit(1);
+      }
+    }, 2000);
+  }
 });
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") app.quit();
 });
-
